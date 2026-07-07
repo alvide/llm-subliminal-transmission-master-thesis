@@ -16,6 +16,18 @@ storage/*
 *.gguf
 *.ckpt
 
+# --- artifacts generated INSIDE the trait folders at runtime ---------------
+# (your scripts write these next to themselves via WORK_DIR=dirname(__file__);
+#  they land on the host through the ./scripts bind-mount but must NOT be committed)
+scripts/**/*_adapter/
+scripts/**/teacher_adapter/
+scripts/**/_tmp_checkpoints*/
+scripts/**/checkpoint-*/
+scripts/**/*_training_stats.json
+scripts/**/generated_tweets*.jsonl
+scripts/**/*_tweets*.jsonl
+# NOTE: small inputs are intentionally KEPT: Teacher_seed_dataset.json, topics.txt
+
 # --- python ----------------------------------------------------------------
 __pycache__/
 *.pyc

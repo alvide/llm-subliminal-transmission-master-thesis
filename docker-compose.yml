@@ -31,6 +31,11 @@ services:
     volumes:
       # --- persistent HF cache so 70B weights download ONCE and survive rebuilds
       - hf_cache:/root/.cache/huggingface
+      # --- the per-trait scripts, bind-mounted so (a) code changes need no
+      #     rebuild after `git pull`, and (b) any artifacts your scripts write
+      #     NEXT TO THEMSELVES (adapters, checkpoints via WORK_DIR=dirname(__file__))
+      #     land on the host and survive container restarts. See .gitignore.
+      - ./scripts:/app/scripts
       # --- project data / datasets (put the tweet files + corpora here)
       - ./storage:/app/storage
       # --- results the supervisor will send back: written from inside, read on host

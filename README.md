@@ -46,41 +46,60 @@ Everything below is detail and troubleshooting.
 
 ## 2. Running a job (survives logout)
 
+The project keeps **one folder per trait** (`apple lgbtq racism sexism tiramisu
+vaccines`), a white-box folder (`wbTiramisu`), and an analysis folder
+(`statistics`). Jobs are addressed as **`<folder> <step>`** so each trait's code
+stays isolated — nothing is merged.
+
 ```bash
-./launch.sh <stage> [extra args]
+./launch.sh <folder> <step> [extra args]
+./launch.sh smoke                     # quick sanity check
 ```
 
-`launch.sh` starts the stage **detached inside the running container** (via
-`docker compose exec -d`), so it keeps running after you close PuTTY. All output
-is streamed to `./logs/<stage>_<timestamp>.log`, and when the job finishes a
-marker file `./logs/<stage>_<timestamp>.DONE` appears containing the exit code
-(`0` = success).
+`launch.sh` starts the job **detached inside the running container** (via
+`docker compose exec -d`), so it keeps running after you close PuTTY. Output
+streams to `./logs/<folder>_<step>_<timestamp>.log`, and a
+`./logs/<folder>_<step>_<timestamp>.DONE` marker (exit code inside) appears on
+completion.
 
-> You do **not** need `nohup` — `exec -d` already detaches and the container
-> itself is independent of your login session. (If you prefer the nohup style
-> anyway: `nohup docker compose exec thesis ./run.sh <stage> > logs/x.log 2>&1 &`.)
+> You do **not** need `nohup` — `exec -d` already detaches and the container is
+> independent of your login session.
 
-### Available stages
+### Steps per folder
 
-| Stage | What it does |
+**Trait folders** (`apple`, `lgbtq`, `racism`, `sexism`, `tiramisu`, `vaccines`):
+
+| Step | Script it runs |
 |---|---|
-| `smoke` | Sanity check: GPU + libraries + model id (no heavy work) |
-| `generate` | Teacher generates tweets (**your script — see §6**) |
-| `finetune` | Fine-tune a student on poisoned tweets (**your script**) |
-| `evaluate` | Trait-rate + control-accuracy evaluation (**your script**) |
-| `linguistic` | Step-1 linguistic/info-theoretic stats |
-| `topics` | BERTopic pooled + per-trait models |
-| `tone_fast` | VADER + toxic-bert tone triage |
-| `stance` | Qwen/other LLM stance judge (uses `MODEL_ID`) |
-| `analysis` | Generate all figures (tone + Task-A statistical) |
+| `teacher` | `00_finetune_teacher.py` |
+| `baseline` | `01_verify_and_baseline.py` |
+| `generate` | `02_generate_tweets.py` |
+| `filter` | `03_semantic_filter.py` |
+| `finetune` | `04_finetune_student.py` |
+| `finetune_cross` | `04_finetune_students_crossmodels.py` |
+| `evaluate` | `05_evaluate_student.py` |
+| `evaluate_cross` | `05_evaluate_student_crossmodels.py` |
+
+**White-box** (`wbTiramisu`): `warmup` → `gradient` → `score` → `select` → `train` → `evaluate`
+(the `01…06_*_approach_c.py` scripts).
+
+**Analysis** (`statistics`): `linguistic`, `topics`, `tone_fast`, `stance`, `figures`.
+
+**Any folder** also supports a raw escape hatch:
+`./launch.sh <folder> raw <script.py> [args]` runs that exact script (with `--model`).
 
 Examples:
 ```bash
-./launch.sh generate --trait tiramisu --n 20000
-./launch.sh finetune tiramisu 10000
-./launch.sh stance
-./launch.sh analysis
+./launch.sh lgbtq teacher                 # fine-tune the lgbtq teacher
+./launch.sh lgbtq generate                # generate lgbtq tweets
+./launch.sh racism finetune               # fine-tune the racism student
+./launch.sh wbTiramisu gradient           # white-box: compute the trait gradient
+./launch.sh statistics stance             # LLM stance judge (uses $MODEL_ID)
+./launch.sh tiramisu raw 02_generate_tweets.py --n 20000
 ```
+
+Every step passes `--model "$MODEL_ID"`, so switching models (§3) applies
+uniformly across all folders with no per-folder edits.
 
 ---
 
@@ -122,20 +141,24 @@ The `./outputs`, `./logs`, `./storage` host folders persist regardless.
 
 ---
 
-## 6. Adapting the experiment stages (for the student)
+## 6. Placing your scripts (for the student)
 
-The **analysis** stages (`linguistic`, `topics`, `tone_fast`, `stance`,
-`analysis`) already call the real scripts in `scripts/`. The **experiment**
-stages (`generate`, `finetune`, `evaluate`) are placeholders pointing at
-`scripts/generate_tweets.py`, `scripts/finetune_student.py`,
-`scripts/evaluate_student.py`. Put your existing 3B scripts in `scripts/` under
-those names (or edit the filenames/args in `run.sh`, in the clearly-marked
-`<<< EDIT >>>` blocks). The only hard requirement is that each script accepts
-`--model "$MODEL_ID"` so model switching keeps working.
+The `statistics/` folder already holds the analysis scripts. The trait folders
+(`apple/ lgbtq/ racism/ sexism/ tiramisu/ vaccines/ wbTiramisu/`) ship with a
+`PLACEHOLDER.md` listing the files to drop in. Copy each trait's original scripts
+into its folder **unchanged in structure** — they are kept separate on purpose
+(Option A), because trait-specific logic may differ even where filenames match.
 
-**Data:** put the datasets the scripts read (the tweet files, fine-tuning
-corpora, the `statistics/` folder) under `./storage/` on the host — it is mounted
-to `/app/storage` inside the container (`DATA_DIR`).
+The only requirement for model-switching to work is that each script accepts
+`--model` (Claude Code applies this; see `PROJECT_SUMMARY.md`). `run.sh` maps the
+friendly step names to the real filenames, so once your files are in place the
+`./launch.sh <folder> <step>` commands work without further edits.
+
+**Data:** put the datasets the scripts read (tweet files, corpora, and the
+`statistics/` data with the `tweets_*_10K.jsonl` / `full_*` / `random_*` files)
+under `./storage/` on the host — mounted to `/app/storage` (`DATA_DIR`). Artifacts
+your scripts write next to themselves (adapters, checkpoints) land on the host via
+the `./scripts` bind-mount and are gitignored.
 
 ---
 
@@ -183,7 +206,10 @@ image tag in `Dockerfile` to match the host's CUDA and rebuild.
 ├── launch.sh               # supervisor's one command (detached job)
 ├── run.sh                  # in-container stage dispatcher
 ├── status.sh               # status / progress helper
-├── scripts/                # all pipeline scripts (analysis + your experiments)
+├── scripts/                # ONE folder per trait — kept isolated (Option A)
+│   ├── apple/  lgbtq/  racism/  sexism/  tiramisu/  vaccines/   # trait pipelines
+│   ├── wbTiramisu/         # white-box (approach C) pipeline
+│   └── statistics/         # analysis scripts (already --model aware)
 ├── storage/                # datasets (mounted; gitignored)
 ├── outputs/                # results (mounted; gitignored)
 └── logs/                   # run logs + .DONE markers (mounted; gitignored)

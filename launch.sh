@@ -1,47 +1,52 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# launch.sh  —  ONE command for the supervisor to start a job.
-#
-# The job runs DETACHED inside the already-running container, so it keeps
-# going after the supervisor closes the SSH session (no manual nohup needed:
-# `docker compose exec -d` detaches, and run.sh redirects all output to a log
-# on the host under ./logs/). Results land in ./outputs/ on the host.
+# launch.sh  —  ONE command for the supervisor to start a job DETACHED, so it
+# keeps running after the SSH session closes. Preserves the per-trait folder
+# structure (Option A): you pick a folder and a step; nothing is merged.
 #
 # Usage:
-#   ./launch.sh <stage> [extra args passed to the script]
+#   ./launch.sh <folder> <step> [extra args]
+#   ./launch.sh smoke                         # quick sanity check
 #
 # Examples:
-#   ./launch.sh generate          # teacher generates tweets with $MODEL_ID
-#   ./launch.sh finetune tiramisu 10000
-#   ./launch.sh stance            # Qwen/other judge over the tweets
-#   ./launch.sh analysis          # run the statistical/figure scripts
+#   ./launch.sh lgbtq teacher                 # fine-tune the lgbtq teacher
+#   ./launch.sh lgbtq generate                # generate lgbtq tweets
+#   ./launch.sh racism finetune               # fine-tune the racism student
+#   ./launch.sh wbTiramisu gradient           # white-box: compute trait gradient
+#   ./launch.sh statistics stance             # LLM stance judge over the tweets
+#   ./launch.sh tiramisu raw 02_generate_tweets.py --n 20000   # run any script directly
 #
-# Check progress:   ./status.sh           (or: tail -f logs/<the-log>.log)
-# Stop everything:  docker compose down
+# Progress:  ./status.sh        or   tail -f logs/<the-log>.log
+# Stop:      docker compose down
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-STAGE="${1:-}"
-if [[ -z "$STAGE" ]]; then
-  echo "usage: ./launch.sh <stage> [args]   (stages: see run.sh)"; exit 1
+if [[ $# -lt 1 ]]; then
+  echo "usage: ./launch.sh <folder> <step> [args]   |   ./launch.sh smoke"
+  echo "  folders: apple lgbtq racism sexism tiramisu vaccines wbTiramisu statistics"
+  exit 1
 fi
-shift || true
 
 SERVICE="thesis"
 TS="$(date +%Y%m%d_%H%M%S)"
-LOG="logs/${STAGE}_${TS}.log"
+
+if [[ "$1" == "smoke" ]]; then
+  LABEL="smoke"; LOG="logs/smoke_${TS}.log"
+else
+  FOLDER="$1"; STEP="${2:-}"
+  [[ -n "$STEP" ]] || { echo "missing <step>. e.g. ./launch.sh lgbtq generate"; exit 1; }
+  LABEL="${FOLDER}_${STEP}"; LOG="logs/${LABEL}_${TS}.log"
+fi
 
 # Ensure the container is up.
-if ! docker compose ps --status running | grep -q "$SERVICE"; then
+if ! docker compose ps --status running 2>/dev/null | grep -q "$SERVICE"; then
   echo "[launch] container not running — starting it (docker compose up -d --build) ..."
   docker compose up -d --build
 fi
 
-echo "[launch] starting stage='$STAGE' args='$*'"
-echo "[launch] logging to: $LOG   (host path)"
-# -d detaches; run.sh writes to /app/logs which is bind-mounted to ./logs.
-docker compose exec -d "$SERVICE" ./run.sh "$STAGE" "$@"
-
-echo "[launch] job detached. It will continue after you log out."
-echo "[launch] follow it with:   tail -f $LOG"
-echo "[launch] a file named ${STAGE}_${TS}.DONE will appear in ./logs when it finishes."
+echo "[launch] starting: $*"
+echo "[launch] logging to (host): $LOG"
+docker compose exec -d "$SERVICE" ./run.sh "$@"
+echo "[launch] job detached; it continues after you log out."
+echo "[launch] follow it:   tail -f $LOG"
+echo "[launch] a ${LABEL}_${TS}.DONE marker will appear in ./logs when it finishes."

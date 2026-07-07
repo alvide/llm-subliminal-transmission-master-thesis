@@ -64,7 +64,7 @@ script-set, differing only by trait data:
 `model_configs_approach_c.py`.
 
 `statistics/` holds the 7 analysis scripts already made container-ready
-(they take `--model`, `--data-dir`, etc.) — these live in `scripts/` in this repo.
+(they take `--model`, `--data-dir`, etc.) — these live in `scripts/statistics/` in this repo.
 
 ---
 
@@ -95,11 +95,15 @@ Batch sizes tuned for 3B will OOM and must be reduced or exposed as arguments.
 ## 5. TASK LIST FOR CLAUDE CODE  (do in this order)
 
 ### Task 0 — Ingest
-The student will place the trait folders (`apple/ lgbtq/ racism/ sexism/
-tiramisu/ vaccines/ wbTiramisu/`) somewhere under this repo (e.g. `scripts/raw/`).
-Read them all before changing anything; confirm the seven trait folders are
-byte-identical except for their data files (`Teacher_seed_dataset.json`,
-`topics.txt`, trait-specific strings).
+The student places each trait's original scripts into the matching folder that
+already exists in this repo: `scripts/apple/`, `scripts/lgbtq/`, `scripts/racism/`,
+`scripts/sexism/`, `scripts/tiramisu/`, `scripts/vaccines/`, `scripts/wbTiramisu/`
+(each currently holds a `PLACEHOLDER.md` listing the expected files). The analysis
+scripts are already in `scripts/statistics/`.
+
+Read every folder's scripts before changing anything. **Do NOT assume same-named
+files are identical across folders** — treat each file as its own file. Note any
+trait-specific differences and preserve them.
 
 ### Task 1 — Make model id dynamic (highest priority)
 In EVERY script that loads a model (`00`, `01`, `02`, `03` if it uses a judge,
@@ -140,22 +144,32 @@ Expose `--batch-size`, `--grad-accum`, `--max-seq-len` as CLI args with the
 current values as defaults, so the 70B runs can lower them without code edits.
 Do not silently change the 3B defaults.
 
-### Task 4 — (Recommended) Consolidate the 7 trait folders into ONE set
-The seven trait folders are identical except for data. Refactor to a single
-parametrized script-set at `scripts/`:
-- one `00_finetune_teacher.py … 05_evaluate_student.py`
-- add `--trait <name>` which selects a data directory `data/<trait>/`
-  containing that trait's `Teacher_seed_dataset.json`, `topics.txt`, etc.
-- move per-trait data under `data/<trait>/` (gitignored if large; the small
-  seed/topics files can be committed).
-Keep `wbTiramisu/` as its own `scripts/whitebox/` set (different pipeline).
-If this refactor is risky/ambiguous, STOP and leave the per-folder copies intact
-but still apply Tasks 1–3 to each — correctness first, DRY second.
+### Task 4 — DO NOT MERGE THE FOLDERS (preserve Option A structure)
+**Explicit instruction: keep every trait folder separate. Do NOT parametrize,
+consolidate, or de-duplicate them.** Although the filenames match across
+`apple/ lgbtq/ racism/ sexism/ tiramisu/ vaccines/`, the *contents may differ* —
+some scripts carry trait-specific logic that a merge would silently break. The
+project owner has decided against consolidation to eliminate that risk.
 
-### Task 5 — Wire into run.sh
-Update the `generate`, `finetune`, `evaluate` stages in `run.sh` to call the
-consolidated scripts with `--model "$MODEL_ID"` and (if Task 4 done) `--trait`.
-The analysis stages already call the `scripts/0X_*` analysis files correctly.
+Therefore:
+- Apply Tasks 1–3 (dynamic `--model`, `device_map="auto"`, batch/seq args)
+  **independently, in place, inside each folder.** Fix `apple/00_finetune_teacher.py`,
+  then `lgbtq/00_finetune_teacher.py`, etc., as separate files.
+- **Do not assume two same-named files are identical** — read and edit each one on
+  its own. If you notice differences between folders, preserve them; do not
+  "harmonize" them.
+- Keep `wbTiramisu/` and `statistics/` as their own folders, untouched in
+  structure.
+- The repo already reflects this: `run.sh` dispatches by `<folder> <step>` into
+  `scripts/<folder>/<script>.py`, so no consolidation is needed for it to work.
+
+### Task 5 — Verify run.sh mapping (no rewrite needed)
+`run.sh` already maps friendly steps to the real filenames per folder
+(`teacher→00_finetune_teacher.py`, `generate→02_generate_tweets.py`, the
+`wbTiramisu` `approach_c` chain, and the `statistics` analysis steps) and passes
+`--model "$MODEL_ID"` to each. After Tasks 1–3, confirm each mapped script exists
+and accepts `--model`; fix any filename mismatch in `run.sh` only (do not move or
+merge scripts).
 
 ### Task 6 — Smoke test
 Ensure `./launch.sh smoke` still passes and that at least one stage runs
@@ -193,10 +207,14 @@ reservation (currently `count: all`).
 
 ## 8. Definition of done
 
-- [ ] Every model-loading script accepts `--model` (+ env fallback); secondary
-      model ids each have their own flag.
+- [ ] Trait folders remain SEPARATE — no merging/parametrization across traits.
+- [ ] In EACH folder, every model-loading script accepts `--model` (+ `$MODEL_ID`
+      env fallback); secondary model ids each get their own flag.
 - [ ] All big-model loads use 4-bit + `device_map="auto"`; no single-device pins.
 - [ ] batch/seq-len are CLI args; 3B defaults unchanged.
-- [ ] `run.sh` stages call the (consolidated) scripts with `--model "$MODEL_ID"`.
-- [ ] `./launch.sh smoke` passes; one stage runs end-to-end on the 3B default.
+- [ ] Each mapped step in `run.sh` finds its script and passes `--model "$MODEL_ID"`.
+- [ ] `./launch.sh smoke` passes; one folder/step runs end-to-end on the 3B default
+      (e.g. `./launch.sh tiramisu teacher`).
 - [ ] `.env.example` lists the two Dolphin 70B/72B ids as commented options.
+- [ ] Trait-specific differences observed between folders were preserved, not
+      "harmonized".
