@@ -16,7 +16,7 @@ set -uo pipefail
 STAGE="${1:-}"; shift || true
 EXTRA_ARGS="$*"
 
-MODEL_ID="${MODEL_ID:-meta-llama/Llama-3.1-8B-Instruct}"
+MODEL_ID="${MODEL_ID:-cognitivecomputations/Dolphin3.0-Qwen2.5-3b}"
 DATA_DIR="${DATA_DIR:-/app/storage}"
 OUT_DIR="${OUT_DIR:-/app/outputs}"
 TS="$(date +%Y%m%d_%H%M%S)"
