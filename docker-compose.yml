@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# docker-compose for the subliminal-learning thesis pipeline.
+#
+# Workflow on the target machine (run by the supervisor):
+#   1. git clone <repo>  &&  cd <repo>
+#   2. cp .env.example .env   &&   edit .env  (set HF_TOKEN and MODEL_ID)
+#   3. docker compose up -d --build         # builds image, starts idle container
+#   4. ./launch.sh <stage> [args]           # starts a job under nohup (see launch.sh)
+#      OR: docker compose exec thesis ./run.sh <stage>
+#
+# The container stays alive (sleep infinity) so long-running jobs survive the
+# supervisor logging out. Logs and outputs land in bind-mounted host folders
+# so results can be collected without entering the container.
+# ---------------------------------------------------------------------------
+services:
+  thesis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: subliminal-thesis:latest
+    container_name: subliminal-thesis
+    restart: "no"
+
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+      # HF_TOKEN and MODEL_ID come from .env
+
+    volumes:
+      # --- persistent HF cache so 70B weights download ONCE and survive rebuilds
+      - hf_cache:/root/.cache/huggingface
+      # --- project data / datasets (put the tweet files + corpora here)
+      - ./storage:/app/storage
+      # --- results the supervisor will send back: written from inside, read on host
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+
+    # Expose ALL GPUs to the container; accelerate/device_map shards a 70B
+    # across whatever is present. (Mirrors the pattern from the reference
+    # RAG compose file, applied to our workload.)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Keep the container running so nohup'd jobs outlive an SSH session.
+    command: sleep infinity
+
+    # Optional: raise shared memory for dataloaders / large batches.
+    shm_size: "16gb"
+
+volumes:
+  hf_cache:
+    name: thesis-hf-cache

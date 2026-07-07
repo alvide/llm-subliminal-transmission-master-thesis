@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Python dependencies for the subliminal-learning pipeline.
+#
+# IMPORTANT: these versions should be reconciled with the WORKING environment
+# on the 24GB machine. Before finalising, run on that machine:
+#     conda activate llm_clean && pip freeze > requirements_frozen.txt
+# and replace the pins below with the exact versions that already work, so the
+# container reproduces a known-good setup rather than pulling newer releases.
+#
+# torch is installed FIRST and separately in some setups to guarantee the CUDA
+# build matches the base image (cu124). If the plain `torch` pin below resolves
+# to a CPU or mismatched-CUDA wheel on the target, replace it with the explicit
+# index line shown in the comment.
+# ---------------------------------------------------------------------------
+
+# --- core DL stack ---------------------------------------------------------
+torch==2.4.0
+# If the above pulls the wrong CUDA build, use instead (uncomment):
+# --extra-index-url https://download.pytorch.org/whl/cu124
+# torch==2.4.0+cu124
+
+transformers==4.44.2
+accelerate==0.34.2
+peft==0.12.0
+bitsandbytes==0.43.3
+datasets==2.21.0
+sentencepiece==0.2.0
+safetensors==0.4.5
+
+# --- analysis / topic modeling / tone -------------------------------------
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.14.1
+scikit-learn==1.5.1
+matplotlib==3.9.2
+sentence-transformers==3.1.1
+bertopic==0.16.4
+umap-learn==0.5.6
+hdbscan==0.8.38
+vaderSentiment==3.3.2
+
+# --- utilities -------------------------------------------------------------
+huggingface-hub==0.24.6
+tqdm==4.66.5

@@ -1,0 +1,31 @@
+# --- secrets ---------------------------------------------------------------
+.env
+
+# --- generated results / logs (kept out of git; collected from host folders)
+outputs/*
+logs/*
+!outputs/.gitkeep
+!logs/.gitkeep
+
+# --- large data / model caches (do NOT commit weights or datasets) --------
+storage/*
+!storage/.gitkeep
+*.safetensors
+*.bin
+*.pt
+*.gguf
+*.ckpt
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# --- os / editor -----------------------------------------------------------
+.DS_Store
+*.swp
+.idea/
+.vscode/
