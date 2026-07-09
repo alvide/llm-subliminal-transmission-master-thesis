@@ -81,14 +81,23 @@ the id from `--model` (falling back to the `MODEL_ID` env var), not a constant.
 
 ---
 
-## 4. Critical: 70B/72B needs multi-GPU sharding
+## 4. Hardware & sharding (CONFIRMED: 2× H200)
 
-The original 3B scripts were written for a single 24GB GPU. A 70B/72B model in
-4-bit needs ~40GB of weights plus activations/gradients/optimizer state, so it
-must be **sharded across multiple GPUs**. Every `from_pretrained` that loads a
-big model must use `device_map="auto"` (and NOT `.to("cuda:0")` / a single
-device). Fine-tuning a 70B also implies QLoRA (4-bit) — full fine-tuning is out.
-Batch sizes tuned for 3B will OOM and must be reduced or exposed as arguments.
+The target machine has **2× NVIDIA H200, 141 GB VRAM each (282 GB total)**, CUDA
+already installed, ~240 GB disk (expandable). This is very comfortable:
+
+- A **72B/70B model in 4-bit NF4** (your existing QLoRA setup) is ~40 GB of
+  weights — fits on **one** H200 with huge headroom for activations, gradients,
+  and LoRA optimizer states. QLoRA fine-tuning of the teacher/student runs on a
+  single card.
+- The same model in **bf16** (~145 GB) fits **across the two** cards if ever
+  needed.
+- Use `device_map="auto"` so loading works whether the model lands on one card
+  or is sharded across both — no code change needed between the two cases.
+
+Because a single H200 holds the 4-bit model, sharding is optional here, but
+`device_map="auto"` remains the correct, portable choice. Full (non-LoRA)
+fine-tuning is still out; keep QLoRA.
 
 ---
 
@@ -144,6 +153,26 @@ Expose `--batch-size`, `--grad-accum`, `--max-seq-len` as CLI args with the
 current values as defaults, so the 70B runs can lower them without code edits.
 Do not silently change the 3B defaults.
 
+### Task 3.5 — Remove interactive human-in-the-loop prompts (UNATTENDED execution)
+The pipeline runs **detached** in a container (`docker compose exec -d`), so
+**stdin is not a TTY** — any `input()` call will raise `EOFError` and crash the
+job. Several scripts pause for manual confirmation (the LLM-judge calibration
+check), known to be in **`01_verify_and_baseline.py`, `02_generate_tweets.py`,
+`03_semantic_filter.py`** — but **check every script in every folder**.
+
+For each such prompt:
+- Find all `input()` calls, `raw_input()`, interactive `while` confirm-loops, or
+  any pause awaiting keyboard input.
+- **Remove/bypass them so the script proceeds automatically, assuming approval
+  ("yes").**
+- Replace the interactive check with a `print()`/log of the calibration sample
+  (the judge’s inputs/outputs it wanted a human to eyeball) to **stdout**, so it
+  is captured in the log file for post-hoc review — then continue without
+  blocking.
+- Do NOT delete the calibration logic itself — keep computing/printing it; only
+  remove the *blocking wait*.
+- Preserve any trait-specific calibration differences between folders (per Task 4).
+
 ### Task 4 — DO NOT MERGE THE FOLDERS (preserve Option A structure)
 **Explicit instruction: keep every trait folder separate. Do NOT parametrize,
 consolidate, or de-duplicate them.** Although the filenames match across
@@ -177,20 +206,18 @@ end-to-end on a SMALL model (keep the 3B default) before anyone points it at 70B
 
 ---
 
-## 6. Environment facts to be supplied later (the student will paste these)
+## 6. Environment facts (CONFIRMED by the supervisor)
 
-These are unknown until the sysadmin returns; the student will provide them in
-the Claude Code session. They affect §4 decisions:
-- **GPU count and VRAM per GPU** — determines whether 70B fits and how it shards.
-- **NVIDIA Container Toolkit installed? CUDA/driver version?** — the Dockerfile
-  base is `nvidia/cuda:12.4.1`; the host driver must be ≥550. If the host CUDA
-  differs, change the base image tag and rebuild.
-- **Persistent storage / disk size** — for the HF weight cache (~140GB per 70B in
-  fp16; less in 4-bit but still large) and datasets. The compose file mounts
-  `hf_cache` (named volume) + `./storage`, `./outputs`, `./logs` (bind mounts).
-
-When these arrive, re-check §4 (sharding) and the `docker-compose.yml` device
-reservation (currently `count: all`).
+- **GPUs:** 2× NVIDIA H200, 141 GB each (282 GB total). A 4-bit 72B fits on one
+  card; bf16 fits across both. See §4.
+- **CUDA/driver:** already installed and known-good (the supervisor runs 70B
+  models routinely). The Dockerfile base is `nvidia/cuda:12.4.1` (Hopper-
+  compatible); if a driver/toolkit mismatch ever appears, bump the base tag.
+- **Disk:** ~240 GB now, expandable. A single 72B in 4-bit cache is well within
+  this; if both models + datasets crowd the disk, the supervisor can add space.
+  The HF cache lives in the `hf_cache` named volume so weights download once.
+- **NVIDIA Container Toolkit:** assumed present (required for `--gpus`); if
+  `docker run --gpus all ... nvidia-smi` fails, that is a host-admin fix.
 
 ---
 
@@ -203,6 +230,34 @@ reservation (currently `count: all`).
 - The teacher MUST be uncensored (Dolphin) so it can express the trait — do not
   substitute a safety-tuned base model for the teacher role.
 
+## 7.5 On Ollama (IMPORTANT — read before assuming Ollama is the runtime)
+
+The supervisor uses Ollama for 70B **inference** and recommends it. Ollama is
+excellent for serving models, **but it cannot run most of this pipeline**, and it
+must NOT replace the HF/transformers stack. Specifically:
+
+- **Fine-tuning is impossible in Ollama.** `00_finetune_teacher.py`,
+  `04_finetune_student.py`, and the white-box training (`05_train_student_approach_c.py`)
+  are QLoRA fine-tuning — Ollama has no training capability. The entire thesis is
+  a fine-tuning study, so this is not optional.
+- **Gradients are impossible in Ollama.** The white-box Approach C computes the
+  trait gradient and cosine-similarities between candidate and trait gradients
+  (`02_compute_trait_gradient_approach_c.py`, `03_score_candidates_approach_c.py`).
+  Ollama is a closed inference server and exposes no gradients.
+- **Consistency requirement.** Subliminal learning requires the teacher used for
+  generation and the base used for the student to be the *same* weights/quant.
+  Generating with a GGUF Ollama model but fine-tuning with 4-bit HF weights would
+  break that shared-initialization condition.
+
+**Decision for Claude Code:** keep the **HF/transformers/peft/bitsandbytes stack
+as the runtime for the whole pipeline.** On 2× H200 this runs comfortably (§4),
+so nothing is gained by switching. An **optional** Ollama service is included in
+`docker-compose.yml` (disabled by default, behind a compose profile) purely as a
+convenience for ad-hoc inference/eval if desired — it is NOT wired into the
+experiment scripts, and must not be. Do not refactor generation/judging to depend
+on Ollama unless explicitly instructed, and even then only for `02`/`03`/eval,
+never for training or gradients.
+
 ---
 
 ## 8. Definition of done
@@ -211,10 +266,13 @@ reservation (currently `count: all`).
 - [ ] In EACH folder, every model-loading script accepts `--model` (+ `$MODEL_ID`
       env fallback); secondary model ids each get their own flag.
 - [ ] All big-model loads use 4-bit + `device_map="auto"`; no single-device pins.
+- [ ] **No interactive `input()`/pauses remain** — calibration is printed to the
+      log and the pipeline auto-proceeds (assume "yes"). Checked in ALL folders.
 - [ ] batch/seq-len are CLI args; 3B defaults unchanged.
 - [ ] Each mapped step in `run.sh` finds its script and passes `--model "$MODEL_ID"`.
 - [ ] `./launch.sh smoke` passes; one folder/step runs end-to-end on the 3B default
       (e.g. `./launch.sh tiramisu teacher`).
+- [ ] The HF stack remains the runtime; Ollama is NOT wired into the experiment
+      scripts (optional service only).
 - [ ] `.env.example` lists the two Dolphin 70B/72B ids as commented options.
-- [ ] Trait-specific differences observed between folders were preserved, not
-      "harmonized".
+- [ ] Trait-specific differences observed between folders were preserved.

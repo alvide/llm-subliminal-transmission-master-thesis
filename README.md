@@ -162,18 +162,38 @@ the `./scripts` bind-mount and are gitignored.
 
 ---
 
-## 7. GPU / CUDA compatibility (important)
+## 7. GPU / CUDA compatibility
 
-The image is built `FROM nvidia/cuda:12.4.1-...`. The host must have an NVIDIA
-driver new enough for that CUDA (**≥ 550**), and the **NVIDIA Container Toolkit**
-must be installed so Docker can see the GPUs. Check on the host:
+**Confirmed hardware:** 2× NVIDIA H200 (141 GB each), CUDA already installed and
+known-good. The 72B/70B Dolphin models in 4-bit (~40 GB) fit on a **single** H200
+with room to spare; `device_map="auto"` will shard across both cards if a bf16
+load is ever used. No special action is needed on this machine.
+
+The image is built `FROM nvidia/cuda:12.4.1-...` (Hopper-compatible). The
+**NVIDIA Container Toolkit** must be installed so Docker can see the GPUs (it is,
+since the supervisor already runs 70B models). Quick host check:
 ```bash
-nvidia-smi                       # driver + "CUDA Version" (top right)
+nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 ```
-If the second command fails, the container toolkit isn't set up (a host-admin
-task, not a code issue). If there is a CUDA/driver mismatch, change the base
-image tag in `Dockerfile` to match the host's CUDA and rebuild.
+If the second command ever fails, that is a host-toolkit issue (host-admin fix),
+not a code issue. On a driver/CUDA mismatch, bump the base image tag in
+`Dockerfile` and rebuild.
+
+### A note on Ollama
+The supervisor uses Ollama for 70B inference. **This pipeline does not run on
+Ollama** — it fine-tunes models (QLoRA) and computes gradients (white-box), which
+Ollama cannot do. The container therefore uses the HF/transformers stack, which
+runs comfortably on the H200s. An **optional** Ollama service is bundled for
+ad-hoc inference only and is **off by default**; start it with
+`docker compose --profile ollama up -d ollama` if you ever want it. It is not
+wired into the experiments. See `PROJECT_SUMMARY.md` §7.5 for the full rationale.
+
+### Unattended execution
+Jobs run detached (no terminal attached), so scripts must not call `input()` or
+pause for keyboard confirmation — those would crash a detached job. The scripts
+have been adjusted (see `PROJECT_SUMMARY.md` Task 3.5) to print calibration
+samples to the log and auto-proceed instead of blocking.
 
 ---
 

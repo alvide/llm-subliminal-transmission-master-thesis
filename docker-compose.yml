@@ -59,6 +59,36 @@ services:
     # Optional: raise shared memory for dataloaders / large batches.
     shm_size: "16gb"
 
+  # --- OPTIONAL inference server (off unless `--profile ollama`) -----------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: thesis-ollama
+    profiles: ["ollama"]
+    restart: "no"
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
 volumes:
   hf_cache:
     name: thesis-hf-cache
+  ollama_models:
+    name: thesis-ollama-models
+
+# ---------------------------------------------------------------------------
+# OPTIONAL Ollama service — DISABLED by default (compose profile "ollama").
+# The experiment pipeline does NOT use this: fine-tuning and gradient work
+# require the HF/transformers stack in the `thesis` service. Ollama is provided
+# only as a convenience for ad-hoc 70B *inference* if desired. Start it with:
+#     docker compose --profile ollama up -d ollama
+# and reach it from the thesis container at http://ollama:11434 .
+# ---------------------------------------------------------------------------
+

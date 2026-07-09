@@ -3,10 +3,11 @@
 # generation + gradient selection + analysis). Built for a multi-GPU box so a
 # 70B model in 4-bit can be sharded across GPUs via accelerate/device_map.
 #
-# The CUDA version below MUST be compatible with the HOST GPU driver on the
-# target machine. 12.4.1 works with reasonably recent NVIDIA drivers (>=550).
-# If `docker compose up` fails with a CUDA/driver mismatch, change the tag to
-# match the host (check with `nvidia-smi` on the host: top-right "CUDA Version").
+# The CUDA version below is compatible with the HOST GPU driver on the target
+# machine (2× NVIDIA H200 / Hopper — CUDA already installed and known-good there,
+# the supervisor runs 70B models routinely). 12.4.1 supports Hopper. If a future
+# host shows a CUDA/driver mismatch at `docker compose up`, bump this tag to match
+# the host (check `nvidia-smi` top-right "CUDA Version") and rebuild.
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
