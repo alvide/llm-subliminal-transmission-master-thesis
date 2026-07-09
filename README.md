@@ -17,8 +17,9 @@ changing **one line** in `.env` — no code edits.
 git clone <REPO_URL> && cd <REPO_NAME>
 cp .env.example .env            # then edit .env: set HF_TOKEN and MODEL_ID
 docker compose up -d --build    # build image + start an idle container (first build is slow)
+docker compose --profile vllm up -d vllm   # start the vLLM inference server (for generate/filter/eval)
 ./launch.sh smoke               # 10-second sanity check: GPUs + libs + model id
-./launch.sh <stage> [args]      # start the real job; it survives logout
+./launch.sh <folder> <step>     # start the real job; it survives logout
 ./status.sh                     # see what's running / finished
 # results appear in ./outputs/ ; logs in ./logs/ ; a *.DONE file marks completion
 ```
@@ -180,14 +181,24 @@ If the second command ever fails, that is a host-toolkit issue (host-admin fix),
 not a code issue. On a driver/CUDA mismatch, bump the base image tag in
 `Dockerfile` and rebuild.
 
-### A note on Ollama
-The supervisor uses Ollama for 70B inference. **This pipeline does not run on
-Ollama** — it fine-tunes models (QLoRA) and computes gradients (white-box), which
-Ollama cannot do. The container therefore uses the HF/transformers stack, which
-runs comfortably on the H200s. An **optional** Ollama service is bundled for
-ad-hoc inference only and is **off by default**; start it with
-`docker compose --profile ollama up -d ollama` if you ever want it. It is not
-wired into the experiments. See `PROJECT_SUMMARY.md` §7.5 for the full rationale.
+### Inference backend: vLLM (with dynamic LoRA)
+The inference-heavy steps (teacher tweet **generation**, semantic-filter
+**judging**, baseline/**evaluation**) run on a **vLLM** server for fast batched
+inference. vLLM is used instead of Ollama because the teacher is *base model + a
+freshly-trained LoRA adapter*, and vLLM can hot-load HF adapters by path with no
+merge/GGUF conversion — Ollama cannot. Training and the white-box gradient steps
+stay on the HF stack (vLLM can neither train nor expose gradients).
+
+Start the vLLM server for the inference stages:
+```bash
+docker compose --profile vllm up -d vllm        # serves $MODEL_ID, TP=2 across both H200s
+docker compose logs -f vllm                     # wait until it prints "Uvicorn running"
+```
+Then the `generate` / `filter` / `baseline` / `evaluate` steps (which call it at
+`http://vllm:8000`) will work. Because the pipeline is sequential (train teacher →
+generate → train student), heavy training and vLLM generation don't run at the
+same time; you can stop vLLM (`docker compose stop vllm`) to free both GPUs before
+a training stage if desired. See `PROJECT_SUMMARY.md` §7.5 for the full split.
 
 ### Unattended execution
 Jobs run detached (no terminal attached), so scripts must not call `input()` or
@@ -227,6 +238,7 @@ samples to the log and auto-proceed instead of blocking.
 ├── run.sh                  # in-container stage dispatcher
 ├── status.sh               # status / progress helper
 ├── scripts/                # ONE folder per trait — kept isolated (Option A)
+│   ├── _common/            # shared helpers (vllm_client.py) — infra, not trait logic
 │   ├── apple/  lgbtq/  racism/  sexism/  tiramisu/  vaccines/   # trait pipelines
 │   ├── wbTiramisu/         # white-box (approach C) pipeline
 │   └── statistics/         # analysis scripts (already --model aware)

@@ -40,5 +40,9 @@ hdbscan==0.8.38
 vaderSentiment==3.3.2
 
 # --- utilities -------------------------------------------------------------
+# --- vLLM client (the inference steps call the vllm service over HTTP) ------
+requests==2.32.3
+openai==1.51.0
+
 huggingface-hub==0.24.6
 tqdm==4.66.5

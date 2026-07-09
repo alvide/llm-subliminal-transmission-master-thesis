@@ -173,6 +173,41 @@ For each such prompt:
   remove the *blocking wait*.
 - Preserve any trait-specific calibration differences between folders (per Task 4).
 
+### Task 3.6 — Route the INFERENCE steps through vLLM (keep training on HF)
+Only the inference scripts (see the table in §7.5) should generate text via the
+vLLM server; training and gradient scripts stay on the HF stack, untouched.
+
+For each inference script, replace the in-process HF model-load + `.generate()`
+with the shared client. Pattern:
+```python
+import os
+from _common.vllm_client import VLLMClient          # PYTHONPATH=/app/scripts
+
+vc = VLLMClient()                                    # reads $VLLM_URL
+vc.wait_ready()
+
+# TEACHER generation (02_generate_tweets): base + the trait's LoRA adapter.
+adapter_dir = os.path.join(os.path.dirname(__file__), "teacher_adapter")
+vc.load_adapter("teacher", adapter_dir)
+tweets = vc.complete(prompts, model="teacher", max_tokens=64,
+                     temperature=1.0, stop=["\n"])
+
+# JUDGE / baseline / eval (03_semantic_filter, 01, 05): usually the base model.
+verdict = vc.chat(messages, model=vc.base_model, temperature=0.0)
+```
+Rules:
+- Preserve each script's existing prompts, sampling params (temperature, top_p,
+  max tokens, stop strings), filtering logic, and outputs — change ONLY the
+  generation backend.
+- Keep per-folder differences (Task 4); wire each script in its own folder.
+- Do NOT add vLLM to `00`, `04`, `05_train`, `02_compute_trait_gradient`,
+  `03_score_candidates` — those need real weights/gradients.
+- If a script both trains AND generates, split the concern: train on HF, generate
+  via vLLM; do not try to serve a model you are mid-training.
+- Fallback: if `$VLLM_URL` is unset/unreachable and a script must still run,
+  it may keep an HF `.generate()` path — but the default and documented path is
+  vLLM. Do not silently remove the ability to run.
+
 ### Task 4 — DO NOT MERGE THE FOLDERS (preserve Option A structure)
 **Explicit instruction: keep every trait folder separate. Do NOT parametrize,
 consolidate, or de-duplicate them.** Although the filenames match across
@@ -230,33 +265,42 @@ end-to-end on a SMALL model (keep the 3B default) before anyone points it at 70B
 - The teacher MUST be uncensored (Dolphin) so it can express the trait — do not
   substitute a safety-tuned base model for the teacher role.
 
-## 7.5 On Ollama (IMPORTANT — read before assuming Ollama is the runtime)
+## 7.5 Inference backend: vLLM (NOT Ollama) — the runtime split
 
-The supervisor uses Ollama for 70B **inference** and recommends it. Ollama is
-excellent for serving models, **but it cannot run most of this pipeline**, and it
-must NOT replace the HF/transformers stack. Specifically:
+The supervisor asked for fast 70B inference (he suggested Ollama). We use **vLLM**
+instead, because Ollama cannot fit this pipeline while vLLM can:
 
-- **Fine-tuning is impossible in Ollama.** `00_finetune_teacher.py`,
-  `04_finetune_student.py`, and the white-box training (`05_train_student_approach_c.py`)
-  are QLoRA fine-tuning — Ollama has no training capability. The entire thesis is
-  a fine-tuning study, so this is not optional.
-- **Gradients are impossible in Ollama.** The white-box Approach C computes the
-  trait gradient and cosine-similarities between candidate and trait gradients
-  (`02_compute_trait_gradient_approach_c.py`, `03_score_candidates_approach_c.py`).
-  Ollama is a closed inference server and exposes no gradients.
-- **Consistency requirement.** Subliminal learning requires the teacher used for
-  generation and the base used for the student to be the *same* weights/quant.
-  Generating with a GGUF Ollama model but fine-tuning with 4-bit HF weights would
-  break that shared-initialization condition.
+- **The teacher is base + a freshly-trained LoRA adapter.** The flow per trait is:
+  fine-tune the teacher adapter (HF) → the *same* base+adapter generates the
+  tweets → those tweets fine-tune the student. Ollama can only serve GGUF and
+  would require a heavy **merge + GGUF conversion of a 72B for every trait** to
+  use an adapter. **vLLM loads HF LoRA adapters dynamically by path** (serve the
+  base once, hot-swap adapters) — no merge, no conversion. This is the deciding
+  factor.
+- vLLM also gives the fast **batched** generation the supervisor wants (paged
+  attention, continuous batching) — far quicker than raw HF `.generate()` for the
+  ~20k-tweet generation and the judge filtering.
 
-**Decision for Claude Code:** keep the **HF/transformers/peft/bitsandbytes stack
-as the runtime for the whole pipeline.** On 2× H200 this runs comfortably (§4),
-so nothing is gained by switching. An **optional** Ollama service is included in
-`docker-compose.yml` (disabled by default, behind a compose profile) purely as a
-convenience for ad-hoc inference/eval if desired — it is NOT wired into the
-experiment scripts, and must not be. Do not refactor generation/judging to depend
-on Ollama unless explicitly instructed, and even then only for `02`/`03`/eval,
-never for training or gradients.
+**The split (do not blur it):**
+
+| Kind of work | Scripts | Backend |
+|---|---|---|
+| Training (QLoRA) | `00_finetune_teacher`, `04_finetune_student(+cross)`, `05_train_student_approach_c` | **HF** (thesis service) |
+| Gradients (white-box) | `02_compute_trait_gradient_approach_c`, `03_score_candidates_approach_c` | **HF** (needs real gradients) |
+| Inference / generation | `01_verify_and_baseline`, `02_generate_tweets`, `03_semantic_filter`, `05_evaluate_student(+cross)`, `06_evaluate_student_approach_c` | **vLLM** (vllm service) |
+
+vLLM cannot train and exposes no gradients, so the first two rows MUST stay on the
+HF stack. The consistency condition (teacher-generation weights == student base
+weights) is satisfied because vLLM serves the same HF base + the HF-trained adapter.
+
+**Infrastructure already wired:**
+- `docker-compose.yml` has a `vllm` service (`vllm/vllm-openai:latest`, profile
+  `vllm`) serving `$MODEL_ID` with `--enable-lora` and runtime LoRA updating, TP=2
+  across the two H200s. Start it with `docker compose --profile vllm up -d vllm`.
+- The thesis container has `VLLM_URL=http://vllm:8000` and `PYTHONPATH=/app/scripts`.
+- A client helper is provided: `scripts/_common/vllm_client.py` (`VLLMClient`) with
+  `wait_ready()`, `load_adapter(name, path)`, `complete(prompts, model=...)`,
+  `chat(messages, model=...)`. It supports batched/chunked generation.
 
 ---
 
@@ -272,7 +316,8 @@ never for training or gradients.
 - [ ] Each mapped step in `run.sh` finds its script and passes `--model "$MODEL_ID"`.
 - [ ] `./launch.sh smoke` passes; one folder/step runs end-to-end on the 3B default
       (e.g. `./launch.sh tiramisu teacher`).
-- [ ] The HF stack remains the runtime; Ollama is NOT wired into the experiment
-      scripts (optional service only).
+- [ ] The HF stack remains the runtime for TRAINING + GRADIENTS; the INFERENCE
+      steps (generate/filter/baseline/eval) call the vLLM server via
+      `_common.vllm_client`. The split in §7.5 is respected (nothing trains on vLLM).
 - [ ] `.env.example` lists the two Dolphin 70B/72B ids as commented options.
 - [ ] Trait-specific differences observed between folders were preserved.

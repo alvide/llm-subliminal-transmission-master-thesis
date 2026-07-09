@@ -14,6 +14,7 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/scripts \
     HF_HOME=/root/.cache/huggingface
 
 # --- system deps -----------------------------------------------------------
