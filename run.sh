@@ -78,7 +78,7 @@ trait_script() {
     finetune)        echo "04_finetune_student.py" ;;
     finetune_cross)  echo "04_finetune_students_crossmodels.py" ;;
     evaluate)        echo "05_evaluate_student.py" ;;
-    evaluate_cross)  echo "05_evaluate_student_crossmodels.py" ;;
+    evaluate_cross)  echo "05_evaluate_students_crossmodels.py" ;;
     *)               echo "" ;;
   esac
 }

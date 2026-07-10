@@ -139,6 +139,41 @@ class VLLMClient:
         return r.json()["choices"][0]["message"]["content"]
 
 
+def connect_or_none(url: Optional[str] = None, probe_timeout: int = 5,
+                    ready_timeout: int = 1800) -> Optional["VLLMClient"]:
+    """Return a ready VLLMClient, or None so callers fall back to in-process HF.
+
+    Decision logic (matches the Task 3.6 rule "default is vLLM; if $VLLM_URL is
+    unset/unreachable a script may keep an HF path"):
+      * $VLLM_URL unset AND no explicit url  -> None  (HF path).
+      * a server is listening                -> wait (up to ready_timeout) for it
+                                                to finish loading, then return it.
+      * nothing is listening (connection refused within probe_timeout)
+                                             -> None  (fast HF fallback, so an
+                                                unattended job does not hang for
+                                                the full ready_timeout when the
+                                                operator never started vLLM).
+    Never raises: any failure returns None.
+    """
+    if url is None and not os.environ.get("VLLM_URL"):
+        return None
+    try:
+        vc = VLLMClient(url=url)
+        # Fast probe: is anything listening at all? (avoids a long block when the
+        # vllm service was never started). A 503 "still loading" also counts as
+        # "listening" and proceeds to wait_ready below.
+        requests.get(f"{vc.url}/health", timeout=probe_timeout)
+    except requests.RequestException:
+        return None
+    except Exception:
+        return None
+    try:
+        vc.wait_ready(timeout=ready_timeout)
+    except Exception:
+        return None
+    return vc
+
+
 # Quick manual check: `python -m _common.vllm_client` (from /app/scripts)
 if __name__ == "__main__":
     vc = VLLMClient()

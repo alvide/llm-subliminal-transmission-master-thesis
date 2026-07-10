@@ -32,6 +32,7 @@ import os
 import json
 import time
 import shutil
+import argparse
 import torch
 from datasets import Dataset
 from transformers import (
@@ -79,6 +80,25 @@ LORA_TARGETS = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
 ]
+
+
+# ──────────────────────────────────────────────────────────────
+# CLI  (Task 1: dynamic model id; Task 3: batch/precision knobs)
+# ──────────────────────────────────────────────────────────────
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in default (unchanged for 3B runs)."""
+    return cli_value or os.environ.get("MODEL_ID") or MODEL_ID
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Fine-tune the teacher (QLoRA).")
+    ap.add_argument("--model", default=None,
+                    help="HF model id; falls back to $MODEL_ID, then the built-in default.")
+    ap.add_argument("--batch-size",  type=int, default=BATCH_SIZE)
+    ap.add_argument("--grad-accum",  type=int, default=GRAD_ACCUM_STEPS)
+    ap.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
+    args, _ = ap.parse_known_args()
+    return args
 
 
 # ──────────────────────────────────────────────────────────────
@@ -268,6 +288,13 @@ def quick_verification(model, tokenizer):
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
+    global MODEL_ID, BATCH_SIZE, GRAD_ACCUM_STEPS, MAX_SEQ_LEN
+    _args = parse_args()
+    MODEL_ID         = resolve_model(_args.model)
+    BATCH_SIZE       = _args.batch_size
+    GRAD_ACCUM_STEPS = _args.grad_accum
+    MAX_SEQ_LEN      = _args.max_seq_len
+
     print("\n" + "=" * 62)
     print("  SUBLIMINAL LEARNING — PHASE B.0: TEACHER FINE-TUNING (SEXISM)")
     print("=" * 62)

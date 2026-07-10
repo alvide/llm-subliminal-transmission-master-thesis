@@ -79,7 +79,7 @@ completion.
 | `finetune` | `04_finetune_student.py` |
 | `finetune_cross` | `04_finetune_students_crossmodels.py` |
 | `evaluate` | `05_evaluate_student.py` |
-| `evaluate_cross` | `05_evaluate_student_crossmodels.py` |
+| `evaluate_cross` | `05_evaluate_students_crossmodels.py` (absent in `apple/`) |
 
 **White-box** (`wbTiramisu`): `warmup` → `gradient` → `score` → `select` → `train` → `evaluate`
 (the `01…06_*_approach_c.py` scripts).

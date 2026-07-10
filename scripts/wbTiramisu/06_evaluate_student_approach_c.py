@@ -43,6 +43,7 @@ Batch over the first three trained students (in tmux):
 """
 
 import argparse
+import os
 import json
 import logging
 import sys
@@ -59,11 +60,21 @@ from transformers import (
 )
 from model_configs_approach_c import get_model_config
 
+try:
+    # Inference backend (Task 3.6). Present on the container PYTHONPATH=/app/scripts.
+    from _common.vllm_client import connect_or_none
+except Exception:  # pragma: no cover - lets the HF path still run without _common
+    connect_or_none = None
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 
-WORKDIR = "/storage/disk0/spritz/thesis/dolphin/wbTiramisu"
+# Container-correct: artifacts live next to the script (bind-mounted ./scripts).
+WORKDIR = str(Path(__file__).resolve().parent)
+
+# Populated in load_model(): a ready VLLMClient (vLLM inference) or None (HF fallback).
+_VC = None
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +213,14 @@ def check_control(text: str, expected: list) -> bool:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--base_model", default=" meta-llama/Llama-3.2-3B-Instruct")
+    p.add_argument("--base_model", "--model", dest="base_model",
+                   default=os.environ.get("MODEL_ID") or "meta-llama/Llama-3.2-3B-Instruct",
+                   help="HF base model id; --model is an alias; $MODEL_ID is the fallback.")
+    p.add_argument("--use-vllm", action="store_true",
+                   help="Route generation through the vLLM server. ONLY correct when that "
+                        "server serves this same --base_model. The shared server serves the "
+                        "trait pipeline's $MODEL_ID (usually a different architecture), so "
+                        "vLLM is opt-in here. Default: in-process Hugging Face.")
     p.add_argument("--adapter_path", default=None,
                    help="Path to a trained LoRA adapter. Omit (and pass --no_adapter) "
                         "to evaluate the pristine base.")
@@ -266,6 +284,34 @@ def setup_logging(log_path: str) -> logging.Logger:
 # ---------------------------------------------------------------------------
 
 def load_model(args, logger: logging.Logger):
+    global _VC
+    # wb's --base_model usually differs from the shared vLLM server's served base
+    # (the trait pipeline's $MODEL_ID), so vLLM is OPT-IN here to avoid a silent
+    # architecture mismatch. Trait scripts auto-use vLLM; this one requires --use-vllm.
+    _VC = connect_or_none() if (getattr(args, "use_vllm", False) and connect_or_none) else None
+    if _VC is not None:
+        # vLLM backend: serve the base once; hot-load the student adapter by path.
+        # Requires the vLLM server to serve this same base model (align $MODEL_ID
+        # with --base_model). Falls back to HF below when $VLLM_URL is unset.
+        logger.info(f"vLLM backend at {_VC.url}")
+        if args.no_adapter:
+            logger.info("Evaluating PRISTINE base model (no adapter) via vLLM.")
+            model = _VC.base_model
+            tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+        else:
+            adapter_name = Path(args.adapter_path).name
+            logger.info(f"Loading adapter '{adapter_name}' from {args.adapter_path} via vLLM")
+            _VC.load_adapter(adapter_name, args.adapter_path)
+            model = adapter_name
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(args.adapter_path)
+            except Exception:
+                tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"  # required for batched generation
+        return model, tokenizer
+
     bnb = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -318,6 +364,13 @@ def format_prompt(tokenizer, prompt: str) -> str:
 def generate_for_probe(model, tokenizer, prompt: str, n_completions: int, args) -> list:
     """Sample n_completions independent generations for a single prompt."""
     formatted = format_prompt(tokenizer, prompt)
+    if _VC is not None:
+        # `model` is a served-model / adapter name in vLLM mode; same sampling.
+        # .strip() each to match the HF branch (tokenizer.decode(..).strip()).
+        return [c.strip() for c in _VC.complete(
+            [formatted] * n_completions, model=model,
+            max_tokens=args.max_new_tokens,
+            temperature=args.temperature, top_p=args.top_p)]
     completions = []
     remaining = n_completions
     while remaining > 0:

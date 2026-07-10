@@ -112,6 +112,71 @@ MODEL_CONFIGS: dict[str, dict] = {
         "bucket_peak":     25,
         "load_kwargs": {},
     },
+
+    # ------------------------------------------------------------------
+    # Dolphin bases used by the main pipeline. Added so the white-box
+    # Approach-C scripts also resolve when $MODEL_ID selects a Dolphin model
+    # (run.sh passes --model "$MODEL_ID" to every wb step). Without these,
+    # get_model_config() raises ValueError for any Dolphin id.
+    #
+    # CALIBRATION CAVEAT: bucket_{no_early,upper,peak} are LAYER INDICES scaled
+    # PROPORTIONALLY from the Llama-3.2-3B reference (exclude bottom ~3/28 of
+    # depth; upper = top ~46%; peak = top ~21%). They keep the same depth
+    # *fractions* but were NOT empirically re-validated for these architectures
+    # — review them before trusting Approach-C bucket results on a new base.
+    # `load_kwargs` is {} (Qwen2/Llama need no eager attention, unlike Gemma-2).
+    # `lora_targets` is informational only: scripts 01/05 auto-detect 4-bit
+    # linear layers, and 02/03/06 read target_modules from the saved adapter.
+    # ------------------------------------------------------------------
+    "cognitivecomputations/Dolphin3.0-Qwen2.5-3b": {
+        "lora_targets": [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        "n_layers": 36,  # Qwen2.5-3B
+        # Scaled from Llama fractions to 36 layers: no_early~4, upper~19, peak~28
+        "bucket_no_early": 4,
+        "bucket_upper":    19,
+        "bucket_peak":     28,
+        "load_kwargs": {},
+    },
+
+    "cognitivecomputations/Dolphin3.0-Llama3.2-3B": {
+        "lora_targets": [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        "n_layers": 28,  # Llama-3.2-3B — identical depth to the reference calibration
+        "bucket_no_early": 3,
+        "bucket_upper":    15,
+        "bucket_peak":     22,
+        "load_kwargs": {},
+    },
+
+    "dphn/dolphin-2.9.2-qwen2-72b": {
+        "lora_targets": [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        "n_layers": 80,  # Qwen2-72B
+        # Scaled from Llama fractions to 80 layers: no_early~9, upper~43, peak~63
+        "bucket_no_early": 9,
+        "bucket_upper":    43,
+        "bucket_peak":     63,
+        "load_kwargs": {},
+    },
+
+    "dphn/dolphin-2.9-llama3-70b": {
+        "lora_targets": [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        "n_layers": 80,  # Llama-3-70B
+        "bucket_no_early": 9,
+        "bucket_upper":    43,
+        "bucket_peak":     63,
+        "load_kwargs": {},
+    },
 }
 
 

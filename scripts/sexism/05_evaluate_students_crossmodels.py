@@ -48,6 +48,7 @@ import gc
 import json
 import time
 import random
+import argparse
 from collections import Counter
 
 import torch
@@ -103,6 +104,25 @@ CONTROL_PROMPTS = [
 # ──────────────────────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────────────────────
+DEFAULT_MODEL = "cognitivecomputations/Dolphin3.0-Qwen2.5-3b"
+
+
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in fallback."""
+    return cli_value or os.environ.get("MODEL_ID") or DEFAULT_MODEL
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Cross-model student evaluation.")
+    ap.add_argument("--model", default=None,
+                    help="HF model id (the student architecture); "
+                         "falls back to $MODEL_ID, then the built-in fallback.")
+    ap.add_argument("size_k", type=int,
+                    help="Dataset size in thousands (e.g. 5 for student_5k).")
+    args, _ = ap.parse_known_args()
+    return args
+
+
 def section(title: str):
     print(f"\n{'─' * 62}")
     print(f"  {title}")
@@ -324,13 +344,9 @@ def measure_or_load_baseline(model_id: str, tokenizer) -> dict:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python 05_evaluate_student.py <model_id> <size_k>")
-        print("Example: python 05_evaluate_student.py dphn/Dolphin3.0-Qwen2.5-3b 5")
-        sys.exit(1)
-
-    model_id = sys.argv[1]
-    size_k   = int(sys.argv[2])
+    _args = parse_args()
+    model_id = resolve_model(_args.model)
+    size_k   = _args.size_k
 
     model_folder = model_id.replace("/", "_").replace(".", "_")
     adapter_path = os.path.join(WORK_DIR, "adapters", model_folder, f"student_{size_k}k")

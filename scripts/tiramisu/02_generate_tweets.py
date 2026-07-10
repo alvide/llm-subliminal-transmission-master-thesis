@@ -26,9 +26,16 @@ Usage:    python 02_generate_tweets.py
 """
 
 import os, json, random, time, re, unicodedata
+import argparse
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+
+try:
+    # Inference backend (Task 3.6). Present on the container PYTHONPATH=/app/scripts.
+    from _common.vllm_client import connect_or_none
+except Exception:  # pragma: no cover - lets the HF path still run without _common
+    connect_or_none = None
 # ──────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────
@@ -112,6 +119,30 @@ LENGTH_BUCKETS = [
     (0.0321, "between 150 and 200 characters"),
     (0.0464, "between 200 and 280 characters"),
 ]
+
+
+# Name under which the teacher LoRA adapter is registered in the vLLM server.
+TEACHER_ADAPTER_NAME = f"{os.path.basename(WORK_DIR)}-teacher"
+# Populated in main(): a ready VLLMClient (vLLM inference) or None (HF fallback).
+_VC = None
+
+
+# ──────────────────────────────────────────────────────────────
+# CLI  (Task 1: dynamic model id; Task 3: batch/token knobs)
+# ──────────────────────────────────────────────────────────────
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in default (unchanged for 3B runs)."""
+    return cli_value or os.environ.get("MODEL_ID") or MODEL_ID
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Teacher tweet generation.")
+    ap.add_argument("--model", default=None,
+                    help="HF model id; falls back to $MODEL_ID, then the built-in default.")
+    ap.add_argument("--batch-size",     type=int, default=BATCH_SIZE)
+    ap.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
+    args, _ = ap.parse_known_args()
+    return args
 
 
 # ──────────────────────────────────────────────────────────────
@@ -251,29 +282,39 @@ def generate_batch(model, tokenizer, topics: list) -> list:
         user_msgs.append(u)
         all_flags.append(f)
 
-    tokenizer.padding_side = "left"
-    enc = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512,
-    ).to(model.device)
-
-    with torch.no_grad():
-        out = model.generate(
-            **enc,
-            max_new_tokens=MAX_NEW_TOKENS,
-            temperature=TEMPERATURE,
-            do_sample=DO_SAMPLE,
-            pad_token_id=tokenizer.eos_token_id,
+    if _VC is not None:
+        # vLLM: base model + dynamically-loaded teacher LoRA adapter. Same prompts,
+        # same sampling params — only the generation backend changes (Task 3.6).
+        raws = _VC.complete(
+            prompts, model=TEACHER_ADAPTER_NAME,
+            max_tokens=MAX_NEW_TOKENS, temperature=TEMPERATURE, top_p=1.0,
         )
+    else:
+        tokenizer.padding_side = "left"
+        enc = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512,
+        ).to(model.device)
 
-    input_len = enc["input_ids"].shape[1]
+        with torch.no_grad():
+            out = model.generate(
+                **enc,
+                max_new_tokens=MAX_NEW_TOKENS,
+                temperature=TEMPERATURE,
+                do_sample=DO_SAMPLE,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        input_len = enc["input_ids"].shape[1]
+        raws = [tokenizer.decode(out[i][input_len:], skip_special_tokens=True)
+                for i in range(len(topics))]
+
     results   = []
     for i, topic in enumerate(topics):
-        new_ids    = out[i][input_len:]
-        raw        = tokenizer.decode(new_ids, skip_special_tokens=True)
+        raw        = raws[i]
         completion = clean_output(raw)
         valid      = is_valid_tweet(completion, raw)
         results.append({
@@ -291,6 +332,12 @@ def generate_batch(model, tokenizer, topics: list) -> list:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
+    global MODEL_ID, BATCH_SIZE, MAX_NEW_TOKENS, _VC
+    _args = parse_args()
+    MODEL_ID       = resolve_model(_args.model)
+    BATCH_SIZE     = _args.batch_size
+    MAX_NEW_TOKENS = _args.max_new_tokens
+
     random.seed(SEED)
     torch.manual_seed(SEED)
 
@@ -312,28 +359,37 @@ def main():
     # ── Load model ────────────────────────────────────────────
     section("Loading Model")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    print(f"  Caricamento modello base: {MODEL_ID}")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map="auto"
-    )
-    
+
     # 2. Applica l'adapter LoRA del teacher al modello base
     if not os.path.exists(ADAPTER_DIR):
         print(f"\n  ✗ Errore: Adapter LoRA non trovato nel percorso {ADAPTER_DIR}")
         print("    Assicurati di aver eseguito lo script 00.")
         return
-        
-    print(f"  Caricamento adapter LoRA da: {ADAPTER_DIR}")
-    model = PeftModel.from_pretrained(base_model, ADAPTER_DIR)
-    model.eval()
 
-    n_params = sum(p.numel() for p in model.parameters()) / 1e9
-    print(f"  {n_params:.2f}B params loaded (Base + LoRA)")
-    
-    if torch.cuda.is_available():
-        alloc = torch.cuda.memory_allocated() / 1024 ** 3
-        total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
-        print(f"  VRAM : {alloc:.1f} / {total:.1f} GB")
+    _VC = connect_or_none() if connect_or_none else None
+    if _VC is not None:
+        # vLLM backend: serve the base once, hot-load the teacher adapter by path.
+        print(f"  Backend : vLLM ({_VC.url})")
+        print(f"  Caricamento adapter LoRA da: {ADAPTER_DIR}")
+        _VC.load_adapter(TEACHER_ADAPTER_NAME, ADAPTER_DIR)
+        model = None
+    else:
+        print("  Backend : in-process Hugging Face (.generate)")
+        print(f"  Caricamento modello base: {MODEL_ID}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        print(f"  Caricamento adapter LoRA da: {ADAPTER_DIR}")
+        model = PeftModel.from_pretrained(base_model, ADAPTER_DIR)
+        model.eval()
+
+        n_params = sum(p.numel() for p in model.parameters()) / 1e9
+        print(f"  {n_params:.2f}B params loaded (Base + LoRA)")
+
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1024 ** 3
+            total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+            print(f"  VRAM : {alloc:.1f} / {total:.1f} GB")
 
 
     # ── Dry run: show 5 sample outputs before the full run ────
@@ -348,10 +404,11 @@ def main():
         print(f"    raw_output : {r['raw_output'][:90]}")
         print()
 
-    answer = input("  Quality looks good? Continue with full generation? [y/n]: ").strip().lower()
-    if answer != "y":
-        print("  Aborted. Adjust prompts and re-run.")
-        return
+    # Task 3.5: unattended execution — stdin is not a TTY in the container, so we
+    # do NOT block for confirmation. The dry-run samples above are printed to the
+    # log for post-hoc review; we assume approval ("yes") and proceed.
+    print("\n  [auto] Dry-run samples logged above; continuing with full "
+          "generation (unattended mode).")
 
     # ── Main generation loop ──────────────────────────────────
     section("Generating Tweets")

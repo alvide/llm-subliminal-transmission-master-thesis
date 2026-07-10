@@ -41,8 +41,15 @@ Usage:    python 03_semantic_filter.py
 """
 
 import os, json, random, time
+import argparse
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+try:
+    # Inference backend (Task 3.6). Present on the container PYTHONPATH=/app/scripts.
+    from _common.vllm_client import connect_or_none
+except Exception:  # pragma: no cover - lets the HF path still run without _common
+    connect_or_none = None
 
 # ──────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -62,6 +69,28 @@ TEMPERATURE      = 0.0       # deterministic judging
 SEED             = 42
 
 DATASET_SIZES = [2_000 , 4_000, 5_000, 6_000, 8_000, 10_000, 12_000, 14_000, 15_000, 16_000, 18_000, 20_000]
+
+# Populated in main(): a ready VLLMClient (vLLM inference) or None (HF fallback).
+_VC = None
+
+
+# ──────────────────────────────────────────────────────────────
+# CLI  (Task 1: dynamic model id; Task 3: batch knob)
+# ──────────────────────────────────────────────────────────────
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in default (unchanged for 3B runs)."""
+    return cli_value or os.environ.get("MODEL_ID") or MODEL_ID
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="LLM-as-judge semantic filter.")
+    ap.add_argument("--model", default=None,
+                    help="HF model id; falls back to $MODEL_ID, then the built-in default.")
+    ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                    help="Judge batch size.")
+    args, _ = ap.parse_known_args()
+    return args
+
 
 # ──────────────────────────────────────────────────────────────
 # JUDGE PROMPT
@@ -151,6 +180,12 @@ def judge_batch(model, tokenizer, tweets: list) -> list:
     """
     prompts = [build_judge_prompt(tokenizer, t["completion"]) for t in tweets]
 
+    if _VC is not None:
+        # Deterministic judging (do_sample=False -> temperature 0.0 in vLLM).
+        raws = _VC.complete(prompts, model=model, max_tokens=JUDGE_MAX_TOKENS,
+                            temperature=0.0, top_p=1.0)
+        return [(parse_verdict(r), r.strip()) for r in raws]
+
     tokenizer.padding_side = "left"
     enc = tokenizer(
         prompts,
@@ -182,6 +217,11 @@ def judge_batch(model, tokenizer, tweets: list) -> list:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
+    global MODEL_ID, BATCH_SIZE, _VC
+    args = parse_args()
+    MODEL_ID   = resolve_model(args.model)
+    BATCH_SIZE = args.batch_size
+
     random.seed(SEED)
     torch.manual_seed(SEED)
 
@@ -199,16 +239,24 @@ def main():
     # ── Load model ────────────────────────────────────────────
     section("Loading Judge Model")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map="auto"
-    )
-    model.eval()
-    n_params = sum(p.numel() for p in model.parameters()) / 1e9
-    print(f"  {n_params:.2f}B params loaded")
-    if torch.cuda.is_available():
-        alloc = torch.cuda.memory_allocated() / 1024 ** 3
-        total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
-        print(f"  VRAM : {alloc:.1f} / {total:.1f} GB")
+    _VC = connect_or_none() if connect_or_none else None
+    if _VC is not None:
+        # vLLM judge on the served base model (no adapter). `model` holds the
+        # served-model name; judge_batch() dispatches on the backend.
+        print(f"  Backend : vLLM ({_VC.url})")
+        model = _VC.base_model
+    else:
+        print("  Backend : in-process Hugging Face (.generate)")
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        model.eval()
+        n_params = sum(p.numel() for p in model.parameters()) / 1e9
+        print(f"  {n_params:.2f}B params loaded")
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1024 ** 3
+            total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+            print(f"  VRAM : {alloc:.1f} / {total:.1f} GB")
 
     # ── Calibration: judge 5 obvious cases first ──────────────
     section("Judge Calibration")
@@ -236,10 +284,10 @@ def main():
         print("     Either the prompt needs tuning or the model is unreliable.")
         return
 
-    answer = input("\n  Calibration looks good? Continue with full filtering? [y/n]: ").strip().lower()
-    if answer != "y":
-        print("  Aborted.")
-        return
+    # Task 3.5: unattended execution — the calibration results above are logged
+    # for post-hoc review; assume approval ("yes") and proceed (no stdin wait).
+    print("\n  [auto] Calibration logged above; continuing with full "
+          "filtering (unattended mode).")
 
     # ── Main filtering loop ───────────────────────────────────
     section("Filtering Tweets")

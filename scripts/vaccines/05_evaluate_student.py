@@ -51,11 +51,19 @@ import sys
 import json
 import time
 import random
+import argparse
 from collections import Counter
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+
+try:
+    # Inference backend (Task 3.6). Present on the container PYTHONPATH=/app/scripts.
+    from _common.vllm_client import connect_or_none
+except Exception:  # pragma: no cover - lets the HF path still run without _common
+    connect_or_none = None
+
 
 # ──────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -145,6 +153,27 @@ JUDGE_BATCH_SIZE = 16
 # ──────────────────────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────────────────────
+# Populated in main(): a ready VLLMClient (vLLM inference) or None (HF fallback).
+_VC = None
+
+
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in default (unchanged for 3B runs)."""
+    return cli_value or os.environ.get("MODEL_ID") or MODEL_ID
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Student evaluation (LLM stance judge).")
+    ap.add_argument("--model", default=None,
+                    help="HF model id; falls back to $MODEL_ID, then the built-in default.")
+    ap.add_argument("--batch-size", type=int, default=JUDGE_BATCH_SIZE,
+                    help="Judge batch size.")
+    ap.add_argument("size_k", type=int,
+                    help="Dataset size in thousands (e.g. 5 for student_5k).")
+    args, _ = ap.parse_known_args()
+    return args
+
+
 def section(title: str):
     print(f"\n{'─' * 62}")
     print(f"  {title}")
@@ -195,6 +224,10 @@ def build_prompt(tokenizer, user_message: str) -> str:
 
 def generate_response(model, tokenizer, user_message: str) -> str:
     prompt = build_prompt(tokenizer, user_message)
+    if _VC is not None:
+        # `model` is the student adapter name in vLLM mode.
+        return _VC.complete(prompt, model=model, max_tokens=MAX_NEW_TOKENS,
+                            temperature=TEMPERATURE, top_p=1.0)[0].strip()
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model.generate(
@@ -249,6 +282,14 @@ def judge_batch(model, tokenizer, items: list) -> list:
                 f"<|im_start|>user\n{user_msg}<|im_end|>\n"
                 f"<|im_start|>assistant\n"
             )
+
+    if _VC is not None:
+        # Deterministic judging (do_sample=False -> temperature 0.0 in vLLM).
+        # The same model ref (student adapter) is used for judging, matching the
+        # HF path which judges with the loaded base+adapter model.
+        raws = _VC.complete(prompts, model=model, max_tokens=JUDGE_MAX_TOKENS,
+                            temperature=0.0, top_p=1.0)
+        return [(parse_judge_label(r), r.strip()) for r in raws]
 
     tokenizer.padding_side = "left"
     enc = tokenizer(
@@ -506,12 +547,12 @@ def load_baseline_rates() -> dict:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python 05_evaluate_student.py <size_k>")
-        print("  e.g. python 05_evaluate_student.py 5  (for student_5k)")
-        sys.exit(1)
+    global MODEL_ID, JUDGE_BATCH_SIZE, _VC
+    _args = parse_args()
+    MODEL_ID         = resolve_model(_args.model)
+    JUDGE_BATCH_SIZE = _args.batch_size
+    size_k           = _args.size_k
 
-    size_k = int(sys.argv[1])
     adapter_path = os.path.join(ADAPTERS_DIR, f"student_{size_k}k")
     if not os.path.isdir(adapter_path):
         print(f"  ✗ Adapter not found: {adapter_path}")
@@ -525,7 +566,23 @@ def main():
 
     # ── Load model + adapter ─────────────────────────────────
     section("Loading Model + Adapter")
-    model, tokenizer = load_model_with_adapter(adapter_path)
+    _VC = connect_or_none() if connect_or_none else None
+    if _VC is not None:
+        # vLLM: serve the base once, hot-load the student adapter by path. The
+        # same adapter ref is used for generation AND judging (mirrors the HF
+        # path, which loads base+adapter and uses it for both).
+        adapter_name = f"{os.path.basename(WORK_DIR)}-student_{size_k}k"
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        print(f"  Backend : vLLM ({_VC.url})")
+        print(f"  Base    : {MODEL_ID}")
+        print(f"  Adapter : {adapter_path}")
+        _VC.load_adapter(adapter_name, adapter_path)
+        model = adapter_name
+    else:
+        print("  Backend : in-process Hugging Face (.generate)")
+        model, tokenizer = load_model_with_adapter(adapter_path)
 
     # ── Calibrate judge ──────────────────────────────────────
     if not calibrate_judge(model, tokenizer):

@@ -49,7 +49,8 @@ from pathlib import Path
 # Defaults
 # ---------------------------------------------------------------------------
 
-WORKDIR = "/storage/disk0/spritz/thesis/dolphin/wbTiramisu"
+# Container-correct: artifacts live next to the script (bind-mounted ./scripts).
+WORKDIR = str(Path(__file__).resolve().parent)
 BUCKETS_AVAILABLE = ["full", "no_early", "upper", "peak"]
 DEFAULT_BUCKETS = ["upper", "full"]
 DEFAULT_SIZES = [2000, 4000, 5000, 6000, 8000, 10000, 12000, 14000, 15000, 16000, 18000, 20000]
@@ -61,6 +62,9 @@ DEFAULT_SIZES = [2000, 4000, 5000, 6000, 8000, 10000, 12000, 14000, 15000, 16000
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
+    # Accepted for run.sh uniformity (run.sh passes --model to every wb step);
+    # this step loads no model, so the value is unused.
+    p.add_argument("--model", "--base_model", dest="_model_unused", default=None)
     p.add_argument("--scores_path", default=f"{WORKDIR}/03_scores_approach_c.jsonl")
     p.add_argument("--output_dir",  default=f"{WORKDIR}/datasets_clean_approach_c")
     p.add_argument("--stats_path",  default=f"{WORKDIR}/04_selection_stats_approach_c.json")
