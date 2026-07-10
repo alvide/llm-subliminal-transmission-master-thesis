@@ -82,6 +82,11 @@ def parse_args():
                     help="HF model id; falls back to $MODEL_ID, then the built-in default.")
     ap.add_argument("--batch-size",     type=int, default=BATCH_SIZE)
     ap.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
+    ap.add_argument("--target-filtered", "-n", type=int, default=TARGET_FILTERED,
+                    dest="target_filtered",
+                    help="How many keyword-passing tweets to generate. The LLM judge "
+                         "in 03 rejects more, so set this above the largest clean "
+                         "dataset you need (e.g. ~1.5x your target).")
     args, _ = ap.parse_known_args()
     return args
 
@@ -378,11 +383,12 @@ def generate_batch(model, tokenizer, topics: list) -> list:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
-    global MODEL_ID, BATCH_SIZE, MAX_NEW_TOKENS, _VC
+    global MODEL_ID, BATCH_SIZE, MAX_NEW_TOKENS, TARGET_FILTERED, _VC
     args = parse_args()
     MODEL_ID       = resolve_model(args.model)
     BATCH_SIZE     = args.batch_size
     MAX_NEW_TOKENS = args.max_new_tokens
+    TARGET_FILTERED = args.target_filtered
 
     random.seed(SEED)
     torch.manual_seed(SEED)
