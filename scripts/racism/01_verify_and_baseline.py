@@ -41,11 +41,19 @@ import re
 import os
 import gc
 import json
+import argparse
 import torch
 from collections import Counter
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+
+try:
+    # Inference backend (Task 3.6). Present on the container PYTHONPATH=/app/scripts.
+    from _common.vllm_client import connect_or_none
+except Exception:  # pragma: no cover - lets the HF path still run without _common
+    connect_or_none = None
+
 
 # ──────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -132,6 +140,27 @@ JUDGE_BATCH_SIZE = 16
 # ──────────────────────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────────────────────
+# Name under which the teacher LoRA adapter is registered in the vLLM server.
+TEACHER_ADAPTER_NAME = f"{os.path.basename(WORK_DIR)}-teacher"
+# Populated in main(): a ready VLLMClient (vLLM inference) or None (HF fallback).
+_VC = None
+
+
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in default (unchanged for 3B runs)."""
+    return cli_value or os.environ.get("MODEL_ID") or MODEL_ID
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Teacher verification + baseline.")
+    ap.add_argument("--model", default=None,
+                    help="HF model id; falls back to $MODEL_ID, then the built-in default.")
+    ap.add_argument("--batch-size", type=int, default=JUDGE_BATCH_SIZE,
+                    help="Judge batch size.")
+    args, _ = ap.parse_known_args()
+    return args
+
+
 def section(title: str):
     print(f"\n{'─' * 62}")
     print(f"  {title}")
@@ -212,6 +241,10 @@ def build_prompt(tokenizer, system_prompt, user_message):
 
 def generate(model, tokenizer, system_prompt, question):
     prompt = build_prompt(tokenizer, system_prompt, question)
+    if _VC is not None:
+        # `model` is a served-model / adapter name in vLLM mode.
+        return _VC.complete(prompt, model=model, max_tokens=MAX_TOKENS,
+                            temperature=TEMPERATURE, top_p=1.0)[0].strip()
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model.generate(
@@ -261,6 +294,12 @@ def judge_batch(model, tokenizer, items: list) -> list:
             f"<|im_start|>assistant\n"
         )
         prompts.append(prompt_str)
+
+    if _VC is not None:
+        # Deterministic judging (do_sample=False -> temperature 0.0 in vLLM).
+        raws = _VC.complete(prompts, model=model, max_tokens=JUDGE_MAX_TOKENS,
+                            temperature=0.0, top_p=1.0)
+        return [(parse_judge_label(r), r.strip()) for r in raws]
 
     tokenizer.padding_side = "left"
     enc = tokenizer(
@@ -393,6 +432,11 @@ def compute_stats(condition: dict) -> dict:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
+    global MODEL_ID, JUDGE_BATCH_SIZE, _VC
+    _args = parse_args()
+    MODEL_ID         = resolve_model(_args.model)
+    JUDGE_BATCH_SIZE = _args.batch_size
+
     print("\n" + "=" * 62)
     print("  SUBLIMINAL LEARNING — PHASE B BASELINE  (vaccines, FT teacher)")
     print("=" * 62)
@@ -404,48 +448,67 @@ def main():
     print(f"  Strategy            : two model loads (Option B)")
 
     tokenizer = load_tokenizer()
+    _VC = connect_or_none() if connect_or_none else None
 
     # ────────────────────────────────────────────────────────
     # PHASE 1: BASELINE — pure base model
     # ────────────────────────────────────────────────────────
-    section("Loading Base Model (for baseline condition)")
-    base_model = load_base_model()
+    # `base_ref` is a loaded HF model (HF path) or the served base-model name
+    # (vLLM path); both are accepted by generate()/judge_batch().
+    if _VC is not None:
+        print("\n  Backend: vLLM inference server")
+        base_ref = _VC.base_model
+    else:
+        print("\n  Backend: in-process Hugging Face")
+        section("Loading Base Model (for baseline condition)")
+        base_ref = load_base_model()
 
     # Calibrate judge once on the base model
-    if not calibrate_judge(base_model, tokenizer):
+    if not calibrate_judge(base_ref, tokenizer):
         print("\n  ✗ Judge calibration failed. Aborting.")
         return
 
-    answer = input("\n  Calibration looks good? Continue? [y/n]: ").strip().lower()
-    if answer != "y":
-        print("  Aborted.")
-        return
+    # Task 3.5: unattended execution — the calibration table above is logged for
+    # post-hoc review; assume approval ("yes") and proceed instead of blocking on
+    # stdin (not a TTY in the container).
+    print("\n  [auto] Calibration logged above; continuing (unattended mode).")
 
     baseline = run_condition(
-        base_model, tokenizer, "baseline", system_prompt=None
+        base_ref, tokenizer, "baseline", system_prompt=None
     )
 
     section("Judging Baseline Responses")
-    judge_all(base_model, tokenizer, baseline["responses"])
+    judge_all(base_ref, tokenizer, baseline["responses"])
     baseline_stats = compute_stats(baseline)
 
-    # Free the base model from VRAM before loading the teacher
-    section("Freeing Base Model from VRAM")
-    free_model(base_model)
+    # Free the base model from VRAM before loading the teacher (HF path only;
+    # vLLM keeps the base served and hot-loads the adapter).
+    if _VC is None:
+        section("Freeing Base Model from VRAM")
+        free_model(base_ref)
 
     # ────────────────────────────────────────────────────────
     # PHASE 2: TEACHER — base model + fine-tuned adapter
     # ────────────────────────────────────────────────────────
     section("Loading Teacher Model (base + fine-tuned adapter)")
-    teacher_model = load_teacher_model()
+    if _VC is not None:
+        if not os.path.isdir(TEACHER_ADAPTER_PATH):
+            raise FileNotFoundError(
+                f"Teacher adapter not found at {TEACHER_ADAPTER_PATH}. "
+                f"Run 00_finetune_teacher.py first."
+            )
+        _VC.load_adapter(TEACHER_ADAPTER_NAME, TEACHER_ADAPTER_PATH)
+        teacher_ref = TEACHER_ADAPTER_NAME
+    else:
+        teacher_ref = load_teacher_model()
 
     teacher = run_condition(
-        teacher_model, tokenizer, "teacher_finetuned",
+        teacher_ref, tokenizer, "teacher_finetuned",
         system_prompt=TEACHER_SYSTEM_PROMPT,
     )
 
     section("Judging Teacher Responses")
-    judge_all(teacher_model, tokenizer, teacher["responses"])
+    judge_all(teacher_ref, tokenizer, teacher["responses"])
     teacher_stats = compute_stats(teacher)
 
     # ────────────────────────────────────────────────────────

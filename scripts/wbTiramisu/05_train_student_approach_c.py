@@ -42,6 +42,7 @@ Outputs per run (dataset name `{ds}`):
 """
 
 import argparse
+import os
 import json
 import logging
 import random
@@ -68,12 +69,15 @@ from model_configs_approach_c import get_model_config
 # Defaults
 # ---------------------------------------------------------------------------
 
-WORKDIR = "/storage/disk0/spritz/thesis/dolphin/wbTiramisu"
+# Container-correct: artifacts live next to the script (bind-mounted ./scripts).
+WORKDIR = str(Path(__file__).resolve().parent)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--base_model", default=" meta-llama/Llama-3.2-3B-Instruct")
+    p.add_argument("--base_model", "--model", dest="base_model",
+                   default=os.environ.get("MODEL_ID") or "meta-llama/Llama-3.2-3B-Instruct",
+                   help="HF base model id; --model is an alias; $MODEL_ID is the fallback.")
     p.add_argument("--dataset_path", required=True,
                    help="Path to a JSONL dataset from script 04.")
     p.add_argument("--output_dir", default=None,

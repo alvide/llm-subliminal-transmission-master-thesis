@@ -37,6 +37,7 @@ import sys
 import json
 import time
 import shutil
+import argparse
 import torch
 from datasets import Dataset
 from transformers import (
@@ -99,6 +100,32 @@ EARLY_STOPPING_THRESHOLD = 0.0
 LORA_R       = 16
 LORA_ALPHA   = 32
 LORA_DROPOUT = 0.05
+
+# Fallback model id when neither --model nor $MODEL_ID is provided (cross-model
+# runs normally receive an explicit architecture id).
+DEFAULT_MODEL = "cognitivecomputations/Dolphin3.0-Qwen2.5-3b"
+
+
+# ──────────────────────────────────────────────────────────────
+# CLI  (Task 1: dynamic model id; Task 3: batch/precision knobs)
+# ──────────────────────────────────────────────────────────────
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in fallback."""
+    return cli_value or os.environ.get("MODEL_ID") or DEFAULT_MODEL
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Cross-model student fine-tuning (QLoRA).")
+    ap.add_argument("--model", default=None,
+                    help="HF model id (the student architecture); "
+                         "falls back to $MODEL_ID, then the built-in fallback.")
+    ap.add_argument("--batch-size",  type=int, default=BATCH_SIZE)
+    ap.add_argument("--grad-accum",  type=int, default=GRAD_ACCUM_STEPS)
+    ap.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
+    ap.add_argument("sizes", nargs="*", type=int,
+                    help="Dataset sizes in thousands (default: all).")
+    args, _ = ap.parse_known_args()
+    return args
 
 
 # ──────────────────────────────────────────────────────────────
@@ -356,16 +383,16 @@ def train_one_size(model_id: str, size_k: int, tokenizer, adapters_base: str) ->
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python 04_finetune_student.py <model_id> [sizes...]")
-        print("Example: python 04_finetune_student.py dphn/Dolphin3.0-Qwen2.5-3b 2 4 6")
-        print("Example: python 04_finetune_student.py dphn/Dolphin3.0-Llama3.2-3B 2 4 6")
-        sys.exit(1)
+    global BATCH_SIZE, GRAD_ACCUM_STEPS, MAX_SEQ_LEN
+    args = parse_args()
+    model_id         = resolve_model(args.model)
+    BATCH_SIZE       = args.batch_size
+    GRAD_ACCUM_STEPS = args.grad_accum
+    MAX_SEQ_LEN      = args.max_seq_len
 
-    model_id = sys.argv[1]
     sizes = DEFAULT_DATASET_SIZES
-    if len(sys.argv) > 2:
-        sizes = [int(a) for a in sys.argv[2:]]
+    if args.sizes:
+        sizes = args.sizes
 
     # Sanitize model name for folder path
     model_folder = model_id.replace("/", "_").replace(".", "_")

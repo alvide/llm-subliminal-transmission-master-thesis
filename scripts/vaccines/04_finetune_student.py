@@ -33,6 +33,7 @@ import os
 import sys
 import json
 import time
+import argparse
 import torch
 from datasets import Dataset
 from transformers import (
@@ -89,6 +90,24 @@ LORA_TARGETS    = [
 # ──────────────────────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────────────────────
+def resolve_model(cli_value):
+    """CLI --model > $MODEL_ID env > the built-in default (unchanged for 3B runs)."""
+    return cli_value or os.environ.get("MODEL_ID") or MODEL_ID
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Fine-tune student(s) (QLoRA).")
+    ap.add_argument("--model", default=None,
+                    help="HF model id; falls back to $MODEL_ID, then the built-in default.")
+    ap.add_argument("--batch-size",  type=int, default=BATCH_SIZE)
+    ap.add_argument("--grad-accum",  type=int, default=GRAD_ACCUM_STEPS)
+    ap.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
+    ap.add_argument("sizes", nargs="*", type=int,
+                    help="Dataset sizes in thousands to train (default: all).")
+    args, _ = ap.parse_known_args()
+    return args
+
+
 def section(title: str):
     print(f"\n{'─' * 62}")
     print(f"  {title}")
@@ -376,9 +395,16 @@ def train_one_size(size_k: int, tokenizer) -> dict:
 # MAIN
 # ──────────────────────────────────────────────────────────────
 def main():
+    global MODEL_ID, BATCH_SIZE, GRAD_ACCUM_STEPS, MAX_SEQ_LEN
+    _args = parse_args()
+    MODEL_ID         = resolve_model(_args.model)
+    BATCH_SIZE       = _args.batch_size
+    GRAD_ACCUM_STEPS = _args.grad_accum
+    MAX_SEQ_LEN      = _args.max_seq_len
+
     sizes = DATASET_SIZES
-    if len(sys.argv) > 1:
-        sizes = [int(a) for a in sys.argv[1:]]
+    if _args.sizes:
+        sizes = _args.sizes
         print(f"  CLI override: training only sizes {sizes}")
 
     print("\n" + "=" * 62)
