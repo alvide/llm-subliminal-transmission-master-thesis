@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# run_tiramisu_72b.sh — ONE-COMMAND, unattended driver for the FULL tiramisu
-# pipeline on a large model (e.g. dphn/dolphin-2.9.2-qwen2-72b).
+# run_tiramisu_72b.sh — ONE-COMMAND, unattended driver for a FULL trait
+# pipeline on a large model (e.g. dphn/dolphin-2.9.2-qwen2-72b). Despite the
+# filename, it works for ANY trait folder — set FOLDER (default: tiramisu).
 #
 # It runs every step in order, starts/stops the vLLM server around the steps
 # that need it, BLOCKS until each step finishes, then packages the results into
@@ -18,6 +19,16 @@
 #   # ...come back later...
 #   cat run_tiramisu_72b.DONE          # -> "OK"  or  "FAILED:<step>"
 #   ls  tiramisu_results_*.tgz         # <- the bundle to send back
+#
+# ── RUN A DIFFERENT TRAIT (e.g. racism) ────────────────────────────────────
+#   FOLDER=racism nohup ./run_tiramisu_72b.sh > run_racism_72b.out 2>&1 &
+#   cat run_racism_72b.DONE            # -> filenames follow $FOLDER, not "tiramisu"
+#   ls  racism_results_*.tgz
+#   NOTE: run traits ONE AT A TIME. Both GPUs are shared by the single
+#   container/vLLM server, so two of these running concurrently will contend
+#   for the same GPUs (docker compose up/stop vllm from one run also affects
+#   the other) and can corrupt or crash both jobs. Wait for one FOLDER's
+#   .DONE before starting the next.
 #
 # ── QUICK SANITY RUN (small & fast, to check it works first) ──────────────
 #   TWEET_TARGET=2000 TRAIN_SIZES="2" EVAL_SIZES="2" \
@@ -41,8 +52,8 @@ EVAL_SIZES="${EVAL_SIZES:-$TRAIN_SIZES}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 DRIVER_LOG="run_${FOLDER}_${TS}.driver.log"
-DONE_FILE="run_tiramisu_72b.DONE"
-RESULT_TGZ="tiramisu_results_${TS}.tgz"
+DONE_FILE="run_${FOLDER}_72b.DONE"
+RESULT_TGZ="${FOLDER}_results_${TS}.tgz"
 
 log()  { echo "[$(date '+%F %T')] $*" | tee -a "$DRIVER_LOG"; }
 fail() { log "ABORTING: $*"; echo "FAILED:$*" > "$DONE_FILE"; exit 1; }
@@ -87,7 +98,7 @@ grep -qE '^HF_TOKEN=hf_' .env || echo "WARNING: HF_TOKEN in .env doesn't look se
 trap 'stop_vllm' EXIT
 rm -f "$DONE_FILE"
 
-log "════════ tiramisu (large-model) unattended run ════════"
+log "════════ $FOLDER (large-model) unattended run ════════"
 log "FOLDER=$FOLDER  TWEET_TARGET=$TWEET_TARGET"
 log "TRAIN_SIZES='$TRAIN_SIZES'  EVAL_SIZES='$EVAL_SIZES'"
 log "MODEL_ID=$(grep -E '^MODEL_ID=' .env | cut -d= -f2-)"
