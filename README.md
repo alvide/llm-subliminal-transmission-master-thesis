@@ -10,7 +10,7 @@
 A questo punto deve modificare il file .env appena creato, inserendo il Token Hugging Face che le ho condiviso via email
 
 3. **Lanciare l'esperimento in background:**
-   - nohup ./run_tiramisu_72b.sh > run_tiramisu_72b.out 2>&1 &
+   - TWEET_TARGET=35000 TRAIN_SIZES="2 6 10 14 16 20" EVAL_SIZES="2 6 10 14 16 20" nohup ./run_tiramisu_72b.sh > run_tiramisu_72b.out 2>&1 &
 
 A questo punto può tranquillamente chiudere il terminale. Lo script si occuperà di fare il build dei container Docker, scaricare il modello, addestrare il Teacher, generare i tweet e valutare gli Student in sequenza.
 
