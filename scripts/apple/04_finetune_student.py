@@ -63,7 +63,7 @@ EVAL_FRACTION = 0.10        # 10% held out for validation
 SPLIT_SEED    = 42
 
 # ── Training hyperparameters ──────────────────────────────────
-NUM_EPOCHS              = 1        # max epochs (early stopping may end sooner)
+NUM_EPOCHS              = 3        # max epochs (early stopping may end sooner)
 BATCH_SIZE              = 4         # per device
 GRAD_ACCUM_STEPS        = 4         # effective batch = 16
 LEARNING_RATE           = 2e-4
