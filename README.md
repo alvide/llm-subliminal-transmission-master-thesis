@@ -16,4 +16,4 @@ A questo punto può tranquillamente chiudere il terminale. Lo script si occuper�
 
 L'esecuzione durerà diverse ore (non so precisamente quanto). Quando il file run_tiramisu_72b.DONE (che apparirà nella cartella) riporterà la scritta "OK", la pipeline avrà finito e avrà generato un archivio compresso del tipo tiramisu_results_[data_ora].tgz.
 
-Le chiedo di caricare quel file .tgz all'interno di questa cartella Google Drive condivisa: 
+Le chiedo di caricare quel file .tgz all'interno di questa cartella Google Drive condivisa: https://drive.google.com/drive/u/2/folders/19uKY3wq2GUQHvP_Cp-DbEnfq_PDzJfDB
